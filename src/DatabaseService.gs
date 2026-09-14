@@ -38,6 +38,21 @@ function getSheet_(sheetName) {
   return sheet;
 }
 
+/**
+ * google.script.run não consegue devolver objetos Date ao cliente (a chamada
+ * inteira retorna null quando isso acontece). Por isso todo valor de data
+ * lido/gravado na planilha é convertido para string ISO antes de sair desta
+ * camada — nenhuma função pública deve devolver um Date "cru".
+ */
+function serializarRegistro_(obj) {
+  var resultado = {};
+  Object.keys(obj).forEach(function (chave) {
+    var valor = obj[chave];
+    resultado[chave] = (valor instanceof Date) ? valor.toISOString() : valor;
+  });
+  return resultado;
+}
+
 function sheetToObjects_(sheet) {
   var values = sheet.getDataRange().getValues();
   if (values.length < 2) return [];
@@ -50,7 +65,7 @@ function sheetToObjects_(sheet) {
     for (var c = 0; c < headers.length; c++) {
       obj[headers[c]] = row[c];
     }
-    out.push(obj);
+    out.push(serializarRegistro_(obj));
   }
   return out;
 }
@@ -82,7 +97,7 @@ function updateRecordById_(sheetName, id, changes) {
         var novo = Object.assign({}, atual, changes);
         var novaLinha = headers.map(function (h) { return novo[h] !== undefined ? novo[h] : ''; });
         sheet.getRange(i + 1, 1, 1, headers.length).setValues([novaLinha]);
-        return { anterior: atual, atual: novo };
+        return { anterior: serializarRegistro_(atual), atual: serializarRegistro_(novo) };
       }
     }
     throw new Error('Registro não encontrado em ' + sheetName + ' (id ' + id + ').');
@@ -140,7 +155,7 @@ function criarRegistroComId_(sheetName, prefix, padding, dadosSemId) {
     var headers = SHEET_HEADERS[sheetName];
     var row = headers.map(function (h) { return registro[h] !== undefined ? registro[h] : ''; });
     sheet.appendRow(row);
-    return registro;
+    return serializarRegistro_(registro);
   } finally {
     lock.releaseLock();
   }
