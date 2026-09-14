@@ -83,19 +83,12 @@
   function init() {
     chamarServidor('obterContextoInicial').then(function (contexto) {
       estado.contexto = contexto;
-      renderTopbarUsuario();
       configurarNavegacao();
       irParaView('busca');
     }).catch(function (erro) {
       document.getElementById('conteudo').innerHTML =
         '<div class="alerta erro">Erro ao carregar o catálogo: ' + escapeHtml(erro.message || erro) + '</div>';
     });
-  }
-
-  function renderTopbarUsuario() {
-    var u = estado.contexto.usuario;
-    document.getElementById('usuario-info').innerHTML =
-      escapeHtml(u.nome) + '<span class="badge-perfil">' + escapeHtml(u.perfil) + '</span>';
   }
 
   function configurarNavegacao() {
