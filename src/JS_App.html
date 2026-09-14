@@ -1,0 +1,855 @@
+<script>
+(function () {
+  'use strict';
+
+  var estado = {
+    contexto: null,
+    view: 'busca',
+    produtos: [],
+    filtros: {},
+    produtoAtual: null
+  };
+
+  // ---------- Infraestrutura de chamada ao servidor ----------
+
+  function chamarServidor(nomeFuncao) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve, reject) {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(function (erro) { reject(erro); })[nomeFuncao].apply(null, args);
+    });
+  }
+
+  function escapeHtml(texto) {
+    if (texto === undefined || texto === null) return '';
+    return String(texto)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function formatarData(valor) {
+    if (!valor) return '—';
+    var d = new Date(valor);
+    if (isNaN(d.getTime())) return String(valor);
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    return p(d.getDate()) + '/' + p(d.getMonth() + 1) + '/' + d.getFullYear() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function classeBadgeStatus(status) {
+    if (['Ativo', 'Em evolução', 'Em modernização'].indexOf(status) !== -1) return 'op';
+    if (status === 'Em levantamento') return 'levantamento';
+    if (status === 'Em validação') return 'validacao';
+    if (status === 'Legado') return 'legado';
+    if (status === 'Descontinuado') return 'descontinuado';
+    return '';
+  }
+
+  function podeEditar() {
+    var p = estado.contexto.usuario.perfil;
+    return p === 'EDITOR' || p === 'ADMINISTRADOR';
+  }
+  function ehAdmin() {
+    return estado.contexto.usuario.perfil === 'ADMINISTRADOR';
+  }
+
+  function optionsDe(lista, valorSelecionado, campoValor, campoLabel) {
+    campoValor = campoValor || 'nome';
+    campoLabel = campoLabel || 'nome';
+    return '<option value="">Todos</option>' + lista.map(function (item) {
+      var v = typeof item === 'string' ? item : item[campoValor];
+      var l = typeof item === 'string' ? item : item[campoLabel];
+      var sel = (valorSelecionado === v) ? 'selected' : '';
+      return '<option value="' + escapeHtml(v) + '" ' + sel + '>' + escapeHtml(l) + '</option>';
+    }).join('');
+  }
+
+  // ---------- Modal ----------
+
+  function abrirModal(htmlConteudo) {
+    document.getElementById('modal-conteudo').innerHTML = htmlConteudo;
+    document.getElementById('modal-overlay').classList.remove('oculto');
+  }
+  function fecharModal() {
+    document.getElementById('modal-overlay').classList.add('oculto');
+    document.getElementById('modal-conteudo').innerHTML = '';
+  }
+  document.getElementById('modal-overlay').addEventListener('click', function (e) {
+    if (e.target.id === 'modal-overlay') fecharModal();
+  });
+
+  // ---------- Inicialização ----------
+
+  function init() {
+    chamarServidor('obterContextoInicial').then(function (contexto) {
+      estado.contexto = contexto;
+      renderTopbarUsuario();
+      configurarNavegacao();
+      irParaView('busca');
+    }).catch(function (erro) {
+      document.getElementById('conteudo').innerHTML =
+        '<div class="alerta erro">Erro ao carregar o catálogo: ' + escapeHtml(erro.message || erro) + '</div>';
+    });
+  }
+
+  function renderTopbarUsuario() {
+    var u = estado.contexto.usuario;
+    document.getElementById('usuario-info').innerHTML =
+      escapeHtml(u.nome) + '<span class="badge-perfil">' + escapeHtml(u.perfil) + '</span>';
+  }
+
+  function configurarNavegacao() {
+    document.querySelectorAll('.nav-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () { irParaView(btn.dataset.view); });
+    });
+  }
+
+  function irParaView(view) {
+    estado.view = view;
+    document.querySelectorAll('.nav-btn').forEach(function (btn) {
+      btn.classList.toggle('active', btn.dataset.view === view);
+    });
+    if (view === 'busca') renderBusca();
+    else if (view === 'dashboard') renderDashboard();
+    else if (view === 'novo') renderFormularioProduto(null);
+    else if (view === 'admin') renderAdmin();
+  }
+
+  // ---------- Busca / listagem ----------
+
+  function renderBusca() {
+    var conteudo = document.getElementById('conteudo');
+    var l = estado.contexto.listas;
+    var f = estado.filtros;
+
+    conteudo.innerHTML =
+      '<div class="card">' +
+        '<h2>Buscar produtos</h2>' +
+        '<div class="linha-filtros">' +
+          '<div class="campo campo-full">' +
+            '<label>Busca (nome, sigla, descrição, categoria, área, responsável, status, tipo)</label>' +
+            '<input type="text" id="f-busca" placeholder="Digite para pesquisar…" value="' + escapeHtml(f.busca || '') + '">' +
+          '</div>' +
+        '</div>' +
+        '<div class="linha-filtros" style="margin-top:10px;">' +
+          '<div class="campo"><label>Categoria</label><select id="f-categoria">' + optionsDe(l.categorias, f.categoria) + '</select></div>' +
+          '<div class="campo"><label>Tipo</label><select id="f-tipo">' + optionsDe(l.tipos, f.tipo) + '</select></div>' +
+          '<div class="campo"><label>Status</label><select id="f-status">' + optionsDe(l.status.map(function(s){return {nome:s};}), f.status) + '</select></div>' +
+          '<div class="campo"><label>Área de negócio</label><select id="f-area">' + optionsDe(l.areas, f.area_negocio) + '</select></div>' +
+          '<div class="campo"><label>Célula COTIC</label><select id="f-celula">' + optionsDe(l.celulas, f.celula_cotic) + '</select></div>' +
+          '<div class="campo"><label>Impacto Reforma Tributária</label><select id="f-impacto">' + optionsDe(l.impactos.map(function(i){return {nome:i};}), f.impacto_reforma_tributaria) + '</select></div>' +
+          '<div class="campo"><label>Iniciativa PDTI</label><select id="f-iniciativa">' + optionsDe(l.iniciativas, f.iniciativaPdti, 'id', 'nome') + '</select></div>' +
+          '<div class="campo"><label>Responsável</label><input type="text" id="f-responsavel" value="' + escapeHtml(f.responsavel || '') + '"></div>' +
+          '<div class="campo">' +
+            '<label><input type="checkbox" id="f-descontinuados" ' + (f.incluirDescontinuados ? 'checked' : '') + '> Incluir descontinuados</label>' +
+          '</div>' +
+        '</div>' +
+        '<div style="margin-top:12px; display:flex; gap:8px;">' +
+          '<button class="btn" id="btn-filtrar">Filtrar</button>' +
+          '<button class="btn secundario" id="btn-limpar-filtros">Limpar filtros</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<h3>Resultados <span class="texto-suave" id="contador-resultados"></span></h3>' +
+        '<div id="tabela-produtos">Carregando…</div>' +
+      '</div>';
+
+    document.getElementById('btn-filtrar').addEventListener('click', aplicarFiltrosBusca);
+    document.getElementById('btn-limpar-filtros').addEventListener('click', function () {
+      estado.filtros = {};
+      renderBusca();
+      carregarProdutos();
+    });
+    document.getElementById('f-busca').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') aplicarFiltrosBusca();
+    });
+
+    carregarProdutos();
+  }
+
+  function aplicarFiltrosBusca() {
+    estado.filtros = {
+      busca: document.getElementById('f-busca').value.trim(),
+      categoria: document.getElementById('f-categoria').value,
+      tipo: document.getElementById('f-tipo').value,
+      status: document.getElementById('f-status').value,
+      area_negocio: document.getElementById('f-area').value,
+      celula_cotic: document.getElementById('f-celula').value,
+      impacto_reforma_tributaria: document.getElementById('f-impacto').value,
+      iniciativaPdti: document.getElementById('f-iniciativa').value,
+      responsavel: document.getElementById('f-responsavel').value.trim(),
+      incluirDescontinuados: document.getElementById('f-descontinuados').checked
+    };
+    carregarProdutos();
+  }
+
+  function carregarProdutos() {
+    var container = document.getElementById('tabela-produtos');
+    container.innerHTML = 'Carregando…';
+    chamarServidor('listarProdutos', estado.filtros).then(function (produtos) {
+      estado.produtos = produtos;
+      document.getElementById('contador-resultados').textContent = '(' + produtos.length + ')';
+      if (produtos.length === 0) {
+        container.innerHTML = '<p class="texto-suave">Nenhum produto encontrado com os filtros atuais.</p>';
+        return;
+      }
+      var linhas = produtos.map(function (p) {
+        return '<tr class="linha-clicavel" data-id="' + escapeHtml(p.id) + '">' +
+          '<td><strong>' + escapeHtml(p.nome) + '</strong>' + (p.sigla ? ' <span class="texto-suave">(' + escapeHtml(p.sigla) + ')</span>' : '') + (p.legado ? ' <span class="badge-status legado">LEGADO</span>' : '') + '</td>' +
+          '<td>' + escapeHtml(p.tipo) + '</td>' +
+          '<td>' + escapeHtml(p.categoria) + '</td>' +
+          '<td><span class="badge-status ' + classeBadgeStatus(p.status) + '">' + escapeHtml(p.status) + '</span></td>' +
+          '<td>' + escapeHtml(p.celula_cotic) + '</td>' +
+          '<td><div class="barra-completude ' + (p.completude >= 100 ? 'ok' : '') + '"><div style="width:' + p.completude + '%"></div></div> ' + p.completude + '%</td>' +
+          '<td>' + escapeHtml(p.impacto_reforma_tributaria) + '</td>' +
+          '<td class="texto-suave">' + formatarData(p.data_atualizacao) + '</td>' +
+        '</tr>';
+      }).join('');
+      container.innerHTML =
+        '<table><thead><tr>' +
+          '<th>Produto</th><th>Tipo</th><th>Categoria</th><th>Status</th><th>Célula</th><th>Completude</th><th>Impacto RT</th><th>Atualizado em</th>' +
+        '</tr></thead><tbody>' + linhas + '</tbody></table>';
+
+      container.querySelectorAll('tr[data-id]').forEach(function (tr) {
+        tr.addEventListener('click', function () { renderDetalheProduto(tr.dataset.id); });
+      });
+    }).catch(function (erro) {
+      container.innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+    });
+  }
+
+  // ---------- Detalhe do produto ----------
+
+  function renderDetalheProduto(id) {
+    var conteudo = document.getElementById('conteudo');
+    conteudo.innerHTML = '<p class="texto-suave">Carregando produto…</p>';
+
+    chamarServidor('obterProduto', id).then(function (dados) {
+      estado.produtoAtual = dados;
+      var p = dados.produto;
+      var c = dados.completude;
+
+      var acoes = '';
+      if (podeEditar()) {
+        acoes += '<button class="btn secundario" id="btn-editar">Editar</button>';
+        if (p.status === 'Em levantamento') {
+          acoes += '<button class="btn" id="btn-avancar-validacao">Enviar para validação</button>';
+        }
+      }
+      if (ehAdmin()) {
+        if (p.status === 'Em validação') {
+          acoes += '<button class="btn sucesso" id="btn-validar">Validar produto</button>';
+        }
+        if (p.status !== 'Descontinuado') {
+          acoes += '<button class="btn perigo" id="btn-descontinuar">Descontinuar</button>';
+        }
+        acoes += '<button class="btn secundario" id="btn-historico">Ver histórico</button>';
+      }
+
+      conteudo.innerHTML =
+        '<button class="btn secundario" id="btn-voltar-busca">&larr; Voltar</button>' +
+        '<div class="card">' +
+          '<div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px;">' +
+            '<div>' +
+              '<h2 style="margin-bottom:4px;">' + escapeHtml(p.nome) + (p.sigla ? ' <span class="texto-suave">(' + escapeHtml(p.sigla) + ')</span>' : '') + '</h2>' +
+              '<span class="badge-status ' + classeBadgeStatus(p.status) + '">' + escapeHtml(p.status) + '</span> ' +
+              '<span class="texto-suave">ID: ' + escapeHtml(p.id) + '</span>' +
+            '</div>' +
+            '<div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start;">' + acoes + '</div>' +
+          '</div>' +
+          '<div style="margin-top:10px;">Completude do cadastro: <div class="barra-completude ' + (c.percentual >= 100 ? 'ok' : '') + '" style="display:inline-block; vertical-align:middle;"><div style="width:' + c.percentual + '%"></div></div> ' + c.percentual + '%' +
+          (c.faltantes.length ? '<div class="texto-suave">Pendente: ' + c.faltantes.map(escapeHtml).join(', ') + '</div>' : '') +
+          '</div>' +
+        '</div>' +
+
+        '<div class="card">' +
+          '<h3>Identificação e negócio</h3>' +
+          '<div class="grid-form">' +
+            campoLeitura('Descrição', p.descricao) +
+            campoLeitura('Tipo de produto', p.tipo) +
+            campoLeitura('Categoria', p.categoria) +
+            campoLeitura('Área de negócio', p.area_negocio) +
+            campoLeitura('Processo de negócio atendido', p.processo_negocio) +
+            campoLeitura('Público-alvo', p.publico_alvo) +
+            campoLeitura('Finalidade', p.finalidade) +
+          '</div>' +
+        '</div>' +
+
+        '<div class="card">' +
+          '<h3>Responsabilidade</h3>' +
+          '<div class="grid-form">' +
+            campoLeitura('Responsável de negócio', p.responsavel_negocio) +
+            campoLeitura('Responsável COTIC', p.responsavel_cotic) +
+            campoLeitura('Responsável técnico', p.responsavel_tecnico) +
+            campoLeitura('Célula/área COTIC', p.celula_cotic) +
+          '</div>' +
+        '</div>' +
+
+        '<div class="card">' +
+          '<h3>Ciclo de vida e conformidade</h3>' +
+          '<div class="grid-form">' +
+            campoLeitura('Fonte da informação', p.fonte) +
+            campoLeitura('Impacto Reforma Tributária', p.impacto_reforma_tributaria) +
+            campoLeitura('Data de cadastro', formatarData(p.data_cadastro)) +
+            campoLeitura('Última atualização', formatarData(p.data_atualizacao)) +
+            campoLeitura('Data de validação', formatarData(p.data_validacao)) +
+            campoLeitura('Usuário que validou', p.usuario_validacao) +
+            (p.status === 'Descontinuado' ? campoLeitura('Motivo da descontinuação', p.motivo_descontinuacao) : '') +
+          '</div>' +
+          (p.observacoes ? '<div style="margin-top:10px;"><strong>Observações:</strong><br>' + escapeHtml(p.observacoes) + '</div>' : '') +
+        '</div>' +
+
+        '<div class="card">' +
+          '<h3>Iniciativas PDTI relacionadas</h3>' +
+          renderListaIniciativasVinculadas(dados.iniciativas) +
+          (podeEditar() ? '<div style="margin-top:10px;"><button class="btn secundario pequeno" id="btn-vincular-iniciativa">+ Vincular iniciativa</button></div>' : '') +
+        '</div>' +
+
+        '<div class="card">' +
+          '<h3>Integrações</h3>' +
+          renderListaIntegracoes(dados.integracoes) +
+          (podeEditar() ? '<div style="margin-top:10px;"><button class="btn secundario pequeno" id="btn-add-integracao">+ Adicionar integração</button></div>' : '') +
+        '</div>' +
+
+        '<div class="card">' +
+          '<h3>Documentação</h3>' +
+          renderListaDocumentos(dados.documentos) +
+          (podeEditar() ? '<div style="margin-top:10px;"><button class="btn secundario pequeno" id="btn-add-documento">+ Adicionar documento</button></div>' : '') +
+        '</div>';
+
+      document.getElementById('btn-voltar-busca').addEventListener('click', function () { irParaView('busca'); });
+
+      var btnEditar = document.getElementById('btn-editar');
+      if (btnEditar) btnEditar.addEventListener('click', function () { renderFormularioProduto(p.id); });
+
+      var btnAvancar = document.getElementById('btn-avancar-validacao');
+      if (btnAvancar) btnAvancar.addEventListener('click', function () {
+        chamarServidor('avancarParaValidacao', p.id).then(function () { renderDetalheProduto(p.id); }).catch(mostrarErroModal);
+      });
+
+      var btnValidar = document.getElementById('btn-validar');
+      if (btnValidar) btnValidar.addEventListener('click', function () {
+        chamarServidor('validarProduto', p.id).then(function () { renderDetalheProduto(p.id); }).catch(mostrarErroModal);
+      });
+
+      var btnDescontinuar = document.getElementById('btn-descontinuar');
+      if (btnDescontinuar) btnDescontinuar.addEventListener('click', function () { abrirModalDescontinuar(p.id); });
+
+      var btnHistorico = document.getElementById('btn-historico');
+      if (btnHistorico) btnHistorico.addEventListener('click', function () { abrirModalHistorico(p.id); });
+
+      var btnVincIni = document.getElementById('btn-vincular-iniciativa');
+      if (btnVincIni) btnVincIni.addEventListener('click', function () { abrirModalVincularIniciativa(p.id); });
+
+      var btnAddInt = document.getElementById('btn-add-integracao');
+      if (btnAddInt) btnAddInt.addEventListener('click', function () { abrirModalIntegracao(p.id); });
+
+      var btnAddDoc = document.getElementById('btn-add-documento');
+      if (btnAddDoc) btnAddDoc.addEventListener('click', function () { abrirModalDocumento(p.id); });
+
+      conteudo.querySelectorAll('[data-desvincular-iniciativa]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          chamarServidor('desvincularIniciativa', btn.dataset.desvincularIniciativa)
+            .then(function () { renderDetalheProduto(p.id); }).catch(mostrarErroModal);
+        });
+      });
+      conteudo.querySelectorAll('[data-remover-integracao]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          chamarServidor('removerIntegracao', btn.dataset.removerIntegracao)
+            .then(function () { renderDetalheProduto(p.id); }).catch(mostrarErroModal);
+        });
+      });
+      conteudo.querySelectorAll('[data-remover-documento]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          chamarServidor('removerDocumento', btn.dataset.removerDocumento)
+            .then(function () { renderDetalheProduto(p.id); }).catch(mostrarErroModal);
+        });
+      });
+    }).catch(function (erro) {
+      conteudo.innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+    });
+  }
+
+  function campoLeitura(rotulo, valor) {
+    return '<div><div class="texto-suave">' + escapeHtml(rotulo) + '</div><div>' + (valor ? escapeHtml(valor) : '<span class="texto-suave">—</span>') + '</div></div>';
+  }
+
+  function renderListaIniciativasVinculadas(iniciativas) {
+    if (!iniciativas.length) return '<p class="texto-suave">Nenhuma iniciativa PDTI vinculada.</p>';
+    return '<ul class="lista-simples">' + iniciativas.map(function (i) {
+      return '<li>' + escapeHtml(i.nome) +
+        (podeEditar() ? ' <button class="btn perigo pequeno" data-desvincular-iniciativa="' + escapeHtml(i.vinculoId) + '">Remover</button>' : '') +
+        '</li>';
+    }).join('') + '</ul>';
+  }
+
+  function renderListaIntegracoes(integracoes) {
+    if (!integracoes.length) return '<p class="texto-suave">Nenhuma integração cadastrada.</p>';
+    return '<ul class="lista-simples">' + integracoes.map(function (i) {
+      return '<li><span><strong>' + escapeHtml(i.nome_integracao) + '</strong>' +
+        (i.tipo ? ' — ' + escapeHtml(i.tipo) : '') +
+        (i.descricao ? '<br><span class="texto-suave">' + escapeHtml(i.descricao) + '</span>' : '') + '</span>' +
+        (podeEditar() ? '<button class="btn perigo pequeno" data-remover-integracao="' + escapeHtml(i.id) + '">Remover</button>' : '') +
+        '</li>';
+    }).join('') + '</ul>';
+  }
+
+  function renderListaDocumentos(documentos) {
+    if (!documentos.length) return '<p class="texto-suave">Nenhum documento cadastrado.</p>';
+    return '<ul class="lista-simples">' + documentos.map(function (d) {
+      return '<li><span>[' + escapeHtml(d.tipo) + '] <a href="' + escapeHtml(d.url) + '" target="_blank" rel="noopener">' + escapeHtml(d.titulo) + '</a></span>' +
+        (podeEditar() ? '<button class="btn perigo pequeno" data-remover-documento="' + escapeHtml(d.id) + '">Remover</button>' : '') +
+        '</li>';
+    }).join('') + '</ul>';
+  }
+
+  function mostrarErroModal(erro) {
+    abrirModal('<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div><div class="modal-acoes"><button class="btn secundario" id="btn-fechar-modal">Fechar</button></div>');
+    document.getElementById('btn-fechar-modal').addEventListener('click', fecharModal);
+  }
+
+  function abrirModalDescontinuar(id) {
+    abrirModal(
+      '<h3>Descontinuar produto</h3>' +
+      '<p class="texto-suave">O produto não será excluído fisicamente; ele passará para o status "Descontinuado" e permanecerá no histórico (RN-007).</p>' +
+      '<div class="campo campo-full"><label>Motivo da descontinuação</label><textarea id="motivo-descontinuacao"></textarea></div>' +
+      '<div id="erro-modal"></div>' +
+      '<div class="modal-acoes"><button class="btn secundario" id="btn-cancelar">Cancelar</button><button class="btn perigo" id="btn-confirmar">Confirmar descontinuação</button></div>'
+    );
+    document.getElementById('btn-cancelar').addEventListener('click', fecharModal);
+    document.getElementById('btn-confirmar').addEventListener('click', function () {
+      var motivo = document.getElementById('motivo-descontinuacao').value.trim();
+      chamarServidor('descontinuarProduto', id, motivo).then(function () {
+        fecharModal();
+        renderDetalheProduto(id);
+      }).catch(function (erro) {
+        document.getElementById('erro-modal').innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+      });
+    });
+  }
+
+  function abrirModalHistorico(id) {
+    abrirModal('<h3>Histórico do produto</h3><div id="lista-historico">Carregando…</div><div class="modal-acoes"><button class="btn secundario" id="btn-fechar-modal">Fechar</button></div>');
+    document.getElementById('btn-fechar-modal').addEventListener('click', fecharModal);
+    chamarServidor('listarHistoricoProduto', id).then(function (registros) {
+      var container = document.getElementById('lista-historico');
+      if (!registros.length) { container.innerHTML = '<p class="texto-suave">Sem registros.</p>'; return; }
+      container.innerHTML = registros.map(function (h) {
+        return '<div class="historico-item">' +
+          '<strong>' + escapeHtml(h.operacao) + '</strong> — campo: ' + escapeHtml(h.campo) + '<br>' +
+          (h.valor_anterior || h.valor_novo ? ('de "' + escapeHtml(h.valor_anterior) + '" para "' + escapeHtml(h.valor_novo) + '"<br>') : '') +
+          escapeHtml(h.usuario) + ' em ' + formatarData(h.data_hora) +
+        '</div>';
+      }).join('');
+    }).catch(mostrarErroModal);
+  }
+
+  function abrirModalVincularIniciativa(produtoId) {
+    var iniciativas = estado.contexto.listas.iniciativas;
+    abrirModal(
+      '<h3>Vincular iniciativa PDTI</h3>' +
+      '<div class="campo campo-full"><label>Iniciativa</label><select id="sel-iniciativa">' +
+        iniciativas.map(function (i) { return '<option value="' + escapeHtml(i.id) + '">' + escapeHtml(i.nome) + '</option>'; }).join('') +
+      '</select></div>' +
+      '<div id="erro-modal"></div>' +
+      '<div class="modal-acoes"><button class="btn secundario" id="btn-cancelar">Cancelar</button><button class="btn" id="btn-confirmar">Vincular</button></div>'
+    );
+    document.getElementById('btn-cancelar').addEventListener('click', fecharModal);
+    document.getElementById('btn-confirmar').addEventListener('click', function () {
+      var iniciativaId = document.getElementById('sel-iniciativa').value;
+      chamarServidor('vincularIniciativa', produtoId, iniciativaId).then(function () {
+        fecharModal();
+        renderDetalheProduto(produtoId);
+      }).catch(function (erro) {
+        document.getElementById('erro-modal').innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+      });
+    });
+  }
+
+  function abrirModalIntegracao(produtoId) {
+    abrirModal(
+      '<h3>Nova integração</h3>' +
+      '<div class="grid-form">' +
+        '<div class="campo"><label>Nome da integração</label><input type="text" id="int-nome"></div>' +
+        '<div class="campo"><label>Tipo</label><input type="text" id="int-tipo" placeholder="Ex.: Produto, Sistema externo, RFB…"></div>' +
+        '<div class="campo campo-full"><label>Descrição</label><textarea id="int-descricao"></textarea></div>' +
+      '</div>' +
+      '<div id="erro-modal"></div>' +
+      '<div class="modal-acoes"><button class="btn secundario" id="btn-cancelar">Cancelar</button><button class="btn" id="btn-confirmar">Salvar</button></div>'
+    );
+    document.getElementById('btn-cancelar').addEventListener('click', fecharModal);
+    document.getElementById('btn-confirmar').addEventListener('click', function () {
+      var item = {
+        produto_id: produtoId,
+        nome_integracao: document.getElementById('int-nome').value.trim(),
+        tipo: document.getElementById('int-tipo').value.trim(),
+        descricao: document.getElementById('int-descricao').value.trim()
+      };
+      chamarServidor('salvarIntegracao', item).then(function () {
+        fecharModal();
+        renderDetalheProduto(produtoId);
+      }).catch(function (erro) {
+        document.getElementById('erro-modal').innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+      });
+    });
+  }
+
+  function abrirModalDocumento(produtoId) {
+    var tipos = estado.contexto.listas.tiposDocumento;
+    abrirModal(
+      '<h3>Novo documento</h3>' +
+      '<div class="grid-form">' +
+        '<div class="campo"><label>Tipo</label><select id="doc-tipo">' + tipos.map(function (t) { return '<option value="' + escapeHtml(t) + '">' + escapeHtml(t) + '</option>'; }).join('') + '</select></div>' +
+        '<div class="campo"><label>Título</label><input type="text" id="doc-titulo"></div>' +
+        '<div class="campo campo-full"><label>URL</label><input type="text" id="doc-url" placeholder="https://…"></div>' +
+      '</div>' +
+      '<div id="erro-modal"></div>' +
+      '<div class="modal-acoes"><button class="btn secundario" id="btn-cancelar">Cancelar</button><button class="btn" id="btn-confirmar">Salvar</button></div>'
+    );
+    document.getElementById('btn-cancelar').addEventListener('click', fecharModal);
+    document.getElementById('btn-confirmar').addEventListener('click', function () {
+      var item = {
+        produto_id: produtoId,
+        tipo: document.getElementById('doc-tipo').value,
+        titulo: document.getElementById('doc-titulo').value.trim(),
+        url: document.getElementById('doc-url').value.trim()
+      };
+      chamarServidor('salvarDocumento', item).then(function () {
+        fecharModal();
+        renderDetalheProduto(produtoId);
+      }).catch(function (erro) {
+        document.getElementById('erro-modal').innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+      });
+    });
+  }
+
+  // ---------- Formulário de cadastro/edição ----------
+
+  function renderFormularioProduto(id) {
+    if (!podeEditar()) {
+      document.getElementById('conteudo').innerHTML = '<div class="alerta aviso">Seu perfil (CONSULTA) não permite cadastrar ou editar produtos.</div>';
+      return;
+    }
+
+    var conteudo = document.getElementById('conteudo');
+    var l = estado.contexto.listas;
+    var edicao = !!id;
+
+    function montarForm(p) {
+      p = p || {};
+      var impactoEditavel = ehAdmin() || !edicao;
+      conteudo.innerHTML =
+        '<div class="card">' +
+          '<h2>' + (edicao ? 'Editar produto: ' + escapeHtml(p.nome) : 'Novo produto') + '</h2>' +
+          (!edicao ? '<p class="texto-suave">Todo produto novo é cadastrado com status "Em levantamento" (seção 26). Apenas Nome e Tipo são obrigatórios neste passo.</p>' : '') +
+          '<div id="erro-form"></div>' +
+
+          '<div class="secao-titulo">Identificação</div>' +
+          '<div class="grid-form">' +
+            campoTexto('f-nome', 'Nome *', p.nome) +
+            campoTexto('f-sigla', 'Sigla', p.sigla) +
+            campoSelect('f-tipo', 'Tipo de produto *', l.tipos, p.tipo) +
+            campoSelect('f-categoria', 'Categoria', l.categorias, p.categoria) +
+            (edicao ? campoSelect('f-fonte', 'Fonte da informação', l.fontes, p.fonte) : campoSelect('f-fonte', 'Fonte da informação', l.fontes, p.fonte)) +
+          '</div>' +
+          '<div class="campo campo-full" style="margin-top:10px;"><label>Descrição</label><textarea id="f-descricao">' + escapeHtml(p.descricao) + '</textarea></div>' +
+
+          '<div class="secao-titulo">Negócio</div>' +
+          '<div class="grid-form">' +
+            campoSelect('f-area', 'Área de negócio', l.areas, p.area_negocio) +
+            campoTexto('f-processo', 'Processo de negócio atendido', p.processo_negocio) +
+            campoTexto('f-publico', 'Público-alvo', p.publico_alvo) +
+            campoTexto('f-finalidade', 'Finalidade', p.finalidade) +
+          '</div>' +
+
+          '<div class="secao-titulo">Responsabilidade</div>' +
+          '<div class="grid-form">' +
+            campoTexto('f-resp-negocio', 'Responsável de negócio', p.responsavel_negocio) +
+            campoTexto('f-resp-cotic', 'Responsável COTIC', p.responsavel_cotic) +
+            campoTexto('f-resp-tecnico', 'Responsável técnico', p.responsavel_tecnico) +
+            campoSelect('f-celula', 'Célula/área COTIC responsável', l.celulas, p.celula_cotic) +
+          '</div>' +
+
+          (edicao ? (
+            '<div class="secao-titulo">Impacto da Reforma Tributária</div>' +
+            '<div class="grid-form">' +
+              (impactoEditavel
+                ? campoSelect('f-impacto', 'Impacto (editável apenas por ADMINISTRADOR)', l.impactos, p.impacto_reforma_tributaria)
+                : campoLeitura('Impacto da Reforma Tributária', p.impacto_reforma_tributaria)) +
+            '</div>'
+          ) : '') +
+
+          '<div class="secao-titulo">Observações</div>' +
+          '<div class="campo campo-full"><textarea id="f-observacoes">' + escapeHtml(p.observacoes) + '</textarea></div>' +
+
+          '<div class="modal-acoes">' +
+            '<button class="btn secundario" id="btn-cancelar-form">Cancelar</button>' +
+            '<button class="btn" id="btn-salvar-form">' + (edicao ? 'Salvar alterações' : 'Cadastrar produto') + '</button>' +
+          '</div>' +
+        '</div>';
+
+      document.getElementById('btn-cancelar-form').addEventListener('click', function () {
+        if (edicao) renderDetalheProduto(id); else irParaView('busca');
+      });
+      document.getElementById('btn-salvar-form').addEventListener('click', function () { salvarFormulario(id, edicao, false); });
+    }
+
+    if (edicao) {
+      chamarServidor('obterProduto', id).then(function (dados) { montarForm(dados.produto); })
+        .catch(function (erro) { conteudo.innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>'; });
+    } else {
+      montarForm({});
+    }
+  }
+
+  function campoTexto(idCampo, rotulo, valor) {
+    return '<div class="campo"><label>' + escapeHtml(rotulo) + '</label><input type="text" id="' + idCampo + '" value="' + escapeHtml(valor) + '"></div>';
+  }
+  function campoSelect(idCampo, rotulo, lista, valorSelecionado) {
+    return '<div class="campo"><label>' + escapeHtml(rotulo) + '</label><select id="' + idCampo + '">' + optionsDe(lista, valorSelecionado) + '</select></div>';
+  }
+
+  function coletarDadosFormulario() {
+    var dados = {
+      nome: document.getElementById('f-nome').value.trim(),
+      sigla: document.getElementById('f-sigla').value.trim(),
+      tipo: document.getElementById('f-tipo').value,
+      categoria: document.getElementById('f-categoria').value,
+      descricao: document.getElementById('f-descricao').value.trim(),
+      area_negocio: document.getElementById('f-area').value,
+      processo_negocio: document.getElementById('f-processo').value.trim(),
+      publico_alvo: document.getElementById('f-publico').value.trim(),
+      finalidade: document.getElementById('f-finalidade').value.trim(),
+      responsavel_negocio: document.getElementById('f-resp-negocio').value.trim(),
+      responsavel_cotic: document.getElementById('f-resp-cotic').value.trim(),
+      responsavel_tecnico: document.getElementById('f-resp-tecnico').value.trim(),
+      celula_cotic: document.getElementById('f-celula').value,
+      fonte: document.getElementById('f-fonte').value,
+      observacoes: document.getElementById('f-observacoes').value.trim()
+    };
+    var impactoEl = document.getElementById('f-impacto');
+    if (impactoEl) dados.impacto_reforma_tributaria = impactoEl.value;
+    return dados;
+  }
+
+  function salvarFormulario(id, edicao, confirmarDuplicidade) {
+    var dados = coletarDadosFormulario();
+    var erroDiv = document.getElementById('erro-form');
+    erroDiv.innerHTML = '';
+
+    var promessa = edicao
+      ? chamarServidor('atualizarProduto', id, dados)
+      : chamarServidor('criarProduto', dados, !!confirmarDuplicidade);
+
+    promessa.then(function (resultado) {
+      if (resultado && resultado.avisoDuplicidade) {
+        var nomes = resultado.avisoDuplicidade.map(function (p) { return p.nome + (p.sigla ? ' (' + p.sigla + ')' : ''); }).join(', ');
+        abrirModal(
+          '<h3>Possível duplicidade</h3>' +
+          '<p>Encontramos produto(s) semelhante(s) já cadastrados: <strong>' + escapeHtml(nomes) + '</strong>.</p>' +
+          '<p>Confirma que este é um produto diferente e deseja continuar o cadastro?</p>' +
+          '<div class="modal-acoes"><button class="btn secundario" id="btn-cancelar">Cancelar</button><button class="btn" id="btn-confirmar">Sim, é um produto diferente</button></div>'
+        );
+        document.getElementById('btn-cancelar').addEventListener('click', fecharModal);
+        document.getElementById('btn-confirmar').addEventListener('click', function () {
+          fecharModal();
+          salvarFormulario(id, edicao, true);
+        });
+        return;
+      }
+      var produtoSalvo = resultado.produto;
+      renderDetalheProduto(produtoSalvo.id);
+    }).catch(function (erro) {
+      erroDiv.innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+    });
+  }
+
+  // ---------- Dashboard ----------
+
+  function renderDashboard() {
+    var conteudo = document.getElementById('conteudo');
+    conteudo.innerHTML = '<p class="texto-suave">Carregando indicadores…</p>';
+
+    chamarServidor('obterIndicadores').then(function (ind) {
+      conteudo.innerHTML =
+        '<div class="card">' +
+          '<h2>Indicadores gerais</h2>' +
+          '<div class="kpis">' +
+            kpi(ind.totalGeral, 'Total cadastrado') +
+            kpi(ind.totalNoCatalogoPrincipal, 'No catálogo principal') +
+            kpi(ind.totalDescontinuados, 'Descontinuados') +
+            kpi(ind.completude.completos, 'Cadastro completo') +
+            kpi(ind.completude.incompletos, 'Com pendências') +
+          '</div>' +
+        '</div>' +
+
+        '<div class="card">' +
+          '<h3>Situação de validação</h3>' +
+          '<div class="kpis">' +
+            kpi(ind.validacao.totalIdentificados, 'Total identificados') +
+            kpi(ind.validacao.emLevantamento, 'Em levantamento') +
+            kpi(ind.validacao.emValidacao, 'Em validação') +
+            kpi(ind.validacao.validados, 'Validados') +
+          '</div>' +
+        '</div>' +
+
+        '<div class="card">' +
+          '<h3>Por status</h3>' +
+          renderBarras(ind.porStatus) +
+        '</div>' +
+
+        '<div class="card">' +
+          '<h3>Por categoria</h3>' +
+          renderBarras(ind.porCategoria) +
+        '</div>';
+    }).catch(function (erro) {
+      conteudo.innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+    });
+  }
+
+  function kpi(valor, rotulo) {
+    return '<div class="kpi"><div class="valor">' + valor + '</div><div class="rotulo">' + escapeHtml(rotulo) + '</div></div>';
+  }
+
+  function renderBarras(objetoContagem) {
+    var entradas = Object.keys(objetoContagem).map(function (k) { return { rotulo: k, valor: objetoContagem[k] }; });
+    if (!entradas.length) return '<p class="texto-suave">Sem dados.</p>';
+    var max = Math.max.apply(null, entradas.map(function (e) { return e.valor; }));
+    return '<div class="lista-barras">' + entradas.map(function (e) {
+      var pct = max ? Math.round((e.valor / max) * 100) : 0;
+      return '<div class="item"><div class="rotulo-item">' + escapeHtml(e.rotulo) + '</div><div class="trilho"><div style="width:' + pct + '%"></div></div><div class="valor-item">' + e.valor + '</div></div>';
+    }).join('') + '</div>';
+  }
+
+  // ---------- Administração ----------
+
+  var abaAdminAtual = 'CATEGORIAS';
+  var LISTAS_ADMIN = [
+    { chave: 'CATEGORIAS', rotulo: 'Categorias' },
+    { chave: 'TIPOS', rotulo: 'Tipos de produto' },
+    { chave: 'AREAS', rotulo: 'Áreas de negócio' },
+    { chave: 'CELULAS', rotulo: 'Células COTIC' },
+    { chave: 'FONTES', rotulo: 'Fontes' },
+    { chave: 'INICIATIVAS', rotulo: 'Iniciativas PDTI' },
+    { chave: 'USUARIOS', rotulo: 'Usuários e perfis' }
+  ];
+
+  function renderAdmin() {
+    var conteudo = document.getElementById('conteudo');
+    if (!ehAdmin()) {
+      conteudo.innerHTML = '<div class="alerta aviso">A administração de parâmetros é exclusiva do perfil ADMINISTRADOR.</div>';
+      return;
+    }
+
+    conteudo.innerHTML =
+      '<div class="card">' +
+        '<div class="abas">' + LISTAS_ADMIN.map(function (l) {
+          return '<button class="aba-btn ' + (l.chave === abaAdminAtual ? 'active' : '') + '" data-aba="' + l.chave + '">' + escapeHtml(l.rotulo) + '</button>';
+        }).join('') + '</div>' +
+        '<div id="conteudo-admin">Carregando…</div>' +
+      '</div>';
+
+    conteudo.querySelectorAll('.aba-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () { abaAdminAtual = btn.dataset.aba; renderAdmin(); });
+    });
+
+    if (abaAdminAtual === 'INICIATIVAS') renderAdminIniciativas();
+    else if (abaAdminAtual === 'USUARIOS') renderAdminUsuarios();
+    else renderAdminListaSimples(abaAdminAtual);
+  }
+
+  function renderAdminListaSimples(nomeLista) {
+    var container = document.getElementById('conteudo-admin');
+    chamarServidor('listarListaSimples', nomeLista).then(function (itens) {
+      container.innerHTML =
+        '<ul class="lista-simples">' + itens.map(function (i) {
+          return '<li>' + escapeHtml(i.nome) + ' <span class="texto-suave">(ordem ' + escapeHtml(i.ordem) + ')</span></li>';
+        }).join('') + '</ul>' +
+        '<div class="linha-filtros" style="margin-top:10px;">' +
+          '<div class="campo"><label>Novo item</label><input type="text" id="admin-novo-nome"></div>' +
+          '<div class="campo"><label>Ordem</label><input type="number" id="admin-novo-ordem" style="width:80px;"></div>' +
+          '<button class="btn" id="admin-btn-adicionar">Adicionar</button>' +
+        '</div>' +
+        '<div id="erro-admin"></div>';
+
+      document.getElementById('admin-btn-adicionar').addEventListener('click', function () {
+        var item = {
+          nome: document.getElementById('admin-novo-nome').value.trim(),
+          ordem: Number(document.getElementById('admin-novo-ordem').value) || 0
+        };
+        chamarServidor('salvarItemListaSimples', nomeLista, item).then(function () {
+          chamarServidor('obterContextoInicial').then(function (ctx) { estado.contexto = ctx; });
+          renderAdminListaSimples(nomeLista);
+        }).catch(function (erro) {
+          document.getElementById('erro-admin').innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+        });
+      });
+    });
+  }
+
+  function renderAdminIniciativas() {
+    var container = document.getElementById('conteudo-admin');
+    chamarServidor('listarIniciativas').then(function (itens) {
+      container.innerHTML =
+        '<ul class="lista-simples">' + itens.map(function (i) {
+          return '<li><span><strong>' + escapeHtml(i.nome) + '</strong>' + (i.grupo_tematico ? ' — ' + escapeHtml(i.grupo_tematico) : '') + '</span></li>';
+        }).join('') + '</ul>' +
+        '<div class="grid-form" style="margin-top:10px;">' +
+          '<div class="campo"><label>Nome</label><input type="text" id="admin-ini-nome"></div>' +
+          '<div class="campo"><label>Grupo temático</label><input type="text" id="admin-ini-grupo"></div>' +
+          '<div class="campo campo-full"><label>Descrição</label><textarea id="admin-ini-descricao"></textarea></div>' +
+        '</div>' +
+        '<button class="btn" id="admin-btn-add-iniciativa" style="margin-top:10px;">Adicionar iniciativa</button>' +
+        '<div id="erro-admin"></div>';
+
+      document.getElementById('admin-btn-add-iniciativa').addEventListener('click', function () {
+        var item = {
+          nome: document.getElementById('admin-ini-nome').value.trim(),
+          grupo_tematico: document.getElementById('admin-ini-grupo').value.trim(),
+          descricao: document.getElementById('admin-ini-descricao').value.trim()
+        };
+        chamarServidor('salvarIniciativa', item).then(function () {
+          chamarServidor('obterContextoInicial').then(function (ctx) { estado.contexto = ctx; });
+          renderAdminIniciativas();
+        }).catch(function (erro) {
+          document.getElementById('erro-admin').innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+        });
+      });
+    });
+  }
+
+  function renderAdminUsuarios() {
+    var container = document.getElementById('conteudo-admin');
+    chamarServidor('listarUsuarios').then(function (usuarios) {
+      container.innerHTML =
+        '<table><thead><tr><th>E-mail</th><th>Nome</th><th>Perfil</th><th>Ativo</th></tr></thead><tbody>' +
+          usuarios.map(function (u) {
+            return '<tr><td>' + escapeHtml(u.email) + '</td><td>' + escapeHtml(u.nome) + '</td><td>' + escapeHtml(u.perfil) + '</td><td>' + (u.ativo === false ? 'Não' : 'Sim') + '</td></tr>';
+          }).join('') +
+        '</tbody></table>' +
+        '<div class="linha-filtros" style="margin-top:10px;">' +
+          '<div class="campo"><label>E-mail</label><input type="text" id="admin-usr-email" placeholder="usuario@sefaz.ce.gov.br"></div>' +
+          '<div class="campo"><label>Nome</label><input type="text" id="admin-usr-nome"></div>' +
+          '<div class="campo"><label>Perfil</label><select id="admin-usr-perfil">' + optionsDe(estado.contexto.listas.perfis.map(function (p) { return { nome: p }; })).replace('<option value="">Todos</option>', '') + '</select></div>' +
+          '<button class="btn" id="admin-btn-add-usuario">Salvar usuário</button>' +
+        '</div>' +
+        '<div id="erro-admin"></div>';
+
+      document.getElementById('admin-btn-add-usuario').addEventListener('click', function () {
+        var item = {
+          email: document.getElementById('admin-usr-email').value.trim(),
+          nome: document.getElementById('admin-usr-nome').value.trim(),
+          perfil: document.getElementById('admin-usr-perfil').value
+        };
+        chamarServidor('salvarUsuario', item).then(function () {
+          renderAdminUsuarios();
+        }).catch(function (erro) {
+          document.getElementById('erro-admin').innerHTML = '<div class="alerta erro">' + escapeHtml(erro.message || erro) + '</div>';
+        });
+      });
+    });
+  }
+
+  init();
+})();
+</script>
