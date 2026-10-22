@@ -78,6 +78,35 @@
     if (e.target.id === 'modal-overlay') fecharModal();
   });
 
+  // ---------- Tema (claro/escuro) ----------
+
+  function temaEfetivo() {
+    var salvo = null;
+    try { salvo = localStorage.getItem('catalogo_tema'); } catch (e) {}
+    if (salvo === 'light' || salvo === 'dark') return salvo;
+    var prefereEscuro = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    return prefereEscuro ? 'dark' : 'light';
+  }
+
+  function atualizarBotaoTema() {
+    var btn = document.getElementById('toggle-tema');
+    if (!btn) return;
+    var escuro = temaEfetivo() === 'dark';
+    btn.textContent = escuro ? '☀️' : '🌙';
+    btn.title = escuro ? 'Mudar para modo claro' : 'Mudar para modo escuro';
+  }
+
+  function alternarTema() {
+    var novo = temaEfetivo() === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem('catalogo_tema', novo); } catch (e) {}
+    document.documentElement.setAttribute('data-theme', novo);
+    atualizarBotaoTema();
+  }
+
+  var btnTema = document.getElementById('toggle-tema');
+  if (btnTema) btnTema.addEventListener('click', alternarTema);
+  atualizarBotaoTema();
+
   // ---------- Inicialização ----------
 
   function init() {

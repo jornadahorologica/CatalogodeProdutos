@@ -3,6 +3,16 @@
 <head>
   <base target="_top">
   <meta charset="utf-8">
+  <script>
+    (function () {
+      try {
+        var tema = localStorage.getItem('catalogo_tema');
+        if (tema === 'light' || tema === 'dark') {
+          document.documentElement.setAttribute('data-theme', tema);
+        }
+      } catch (e) {}
+    })();
+  </script>
   <?!= include('CSS'); ?>
 </head>
 <body>
@@ -19,6 +29,7 @@
         <button class="nav-btn" data-view="admin">Administração</button>
       </nav>
       <img class="topbar-logo" src="https://www.ce.gov.br/sefaz/wp-content/uploads/sites/46/2020/08/Secretaria-da-Fazenda-INVERTIDA-WEB-branca-home-2.png" alt="SEFAZ-CE">
+      <button class="btn-tema" id="toggle-tema" title="Alternar tema" aria-label="Alternar tema">🌙</button>
     </header>
 
     <main id="conteudo">
